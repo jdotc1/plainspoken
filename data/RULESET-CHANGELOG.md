@@ -2,6 +2,39 @@
 
 Ruleset versions are separate from the plugin version. Every report records the ruleset version it used.
 
+## 4.4.0 (2026-10-31)
+
+- **Rule 7d skips its no-long-sentence test in short pieces (#148):** new threshold `staccato_long_min_words = 150`.
+  A piece under 150 words (counted as 12f counts them, the words in its rhythm sentences) gets only 7d's short-run
+  test, whatever its content type, the way social posts already did. That covers a narrative profile's
+  `long_sentence_headings` sections too. The FAQ test, the narrative run-and-no-long test and rule 7 don't change,
+  and a piece of 150 words or more is checked exactly as before. A profile that sets the key to 0 gets the old
+  behaviour back.
+- **Why:** in a two-paragraph email the only fix the no-long test can ask for is a padded sentence, which is the
+  pressure #73 is about. The issue's 121-word email got 7d for having no sentence over 25 words, and the plain fix
+  was to keep it as it was.
+- **The engine half:** a greeting that opens a piece ("Hi Sam,") and a sign-off that closes it ("Cheers, Alex") no
+  longer count as 7d sentences, so a short email can't reach the five-sentence run on its greeting. That's a
+  separate engine commit, not a ruleset key.
+- **A link or button line isn't a 7d sentence (#186):** a source line holding only one link or one button label
+  (`[Book a call]`, `**[Book a call](url)**`, `<a href="url">Book</a>`) no longer counts as a sentence for 7d, or for
+  NR-2, which reads 7d. So a call to action of two short sentences and a button has too few sentences to check. A
+  label of `staccato_short_len` words or more stays a sentence, and so does a sentence that only contains a link or
+  a link closed by a full stop. Rule 7, the other rules and the word count still see the line. This is an engine
+  commit too, not a ruleset key. In round 9 all three bookkeeping pages ended on this 7d WARN, and one check ended
+  UNRESOLVED after three rejected reasons.
+- **Measured effect (lint only, no model calls, against 4.3.0):** on the verdict-diff corpus, 149 of 277 texts
+  change, all of them golden cases under 150 words. 7d WARNs go from 155 to 5, and 114 texts move from WARN to CLEAN;
+  no other rule changes. The five 7d WARNs left are the run-form judge-review cases, so no golden case goes stale.
+  #186 changes nothing in this corpus. On the 797 saved campaign pieces (rounds 1 to 9, deduplicated), 7d WARNs go
+  from 678 to 145: emails 61 to 1, text messages 40 to 0, long-form pieces 65 to 62. The long-form drop is #186, the
+  three bookkeeping pages, and it's the only change #186 makes there. No piece gains a finding, and rule 7 stays at 4.
+- **What goes stale:** saved lint reports, judge results and kept-WARN justifications made under 4.3.0 read as
+  stale and ask for a re-check, which is right, because a 7d WARN someone justified may no longer fire. The file's
+  bytes change, so a pending kaizen proposal rebases.
+- Added by hand, not through `kaizen apply`, with the version bump because results change. The owner approves by
+  merging the pull request.
+
 ## Claims rubric revision (2026-10-30; ruleset version unchanged)
 
 - **A pinned claim is judged on its passage (#77):** a claim whose text and locations say no more than its pinned

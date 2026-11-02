@@ -78,7 +78,8 @@ def skill_of(fm: dict) -> str:
 
 
 REWRITE_GRADERS = {"no-flagged-words.md", "em-dash-cap.md", "no-new-numbers.md", "kept-the-facts.md"}
-NOT_CONTAINS = {"no-flagged-words.md", "em-dash-cap.md", "no-new-numbers.md"}
+OPTIONAL_GRADERS = {"kept-the-limits.md"}  # #147: a case whose limits and promises must survive
+NOT_CONTAINS = {"no-flagged-words.md", "em-dash-cap.md", "no-new-numbers.md", "no-lint-to-devnull.md"}
 SOCIAL = {"rewrite--linkedin-post"}  # graded with the social content type's caps; the rest are articles
 # Python-only or JS-only regex syntax. `claude plugin eval` runs the patterns as JavaScript and this test runs them
 # through Python `re`, so a pattern must mean the same in both.
@@ -171,7 +172,7 @@ def proper_nouns(text: str) -> list[str]:
 class RewriteCases(unittest.TestCase):
     def test_rewrite_cases_shape(self):
         found = list(rewrite_cases())
-        self.assertEqual(len(found), 17)
+        self.assertEqual(len(found), 18)
         for d, fm, prompt, graders in found:
             with self.subTest(case=d.name):
                 self.assertEqual(set(fm) - CASE_KEYS, set())
@@ -190,7 +191,8 @@ class RewriteCases(unittest.TestCase):
                 ask = "\n".join(ln for ln in prompt.splitlines() if not ln.startswith(">"))
                 self.assertTrue(ask.strip())
                 self.assertIsNone(re.search(r"\d", ask), "a number in the request would count as the passage's")
-                self.assertEqual({name for name, _, _ in graders}, REWRITE_GRADERS)
+                self.assertLessEqual(REWRITE_GRADERS, {name for name, _, _ in graders})
+                self.assertLessEqual({name for name, _, _ in graders} - REWRITE_GRADERS, OPTIONAL_GRADERS)
                 for name, g, _ in graders:
                     self.assertEqual(g.get("type"), "regex", name)
                     self.assertIn(g.get("target", "last_message"), {"last_message"}, name)
@@ -286,6 +288,21 @@ class RewriteCases(unittest.TestCase):
                 for noun in names:
                     dropped = re.sub(re.escape(noun), "Zz", reference, flags=re.I)
                     self.assertIsNone(kept.search(dropped), f"kept-the-facts passes without {noun}")
+
+    def test_kept_the_limits_needs_every_limit(self):  # #147: an exclusion, an approval promise, a condition
+        cases = [(d, graders) for d, _, _, graders in rewrite_cases()
+                 if any(n == "kept-the-limits.md" for n, _, _ in graders)]
+        fix = EXTRA[1] / "fix--client-email"
+        self.assertEqual([d.name for d, _ in cases], ["rewrite--client-email"])
+        reference = (cases[0][0] / "reference.md").read_text(encoding="utf-8")
+        for d, graders in (cases[0], (fix, _case(fix)[3])):
+            rx = compiled(next(g for n, g, _ in graders if n == "kept-the-limits.md"))
+            text = reference if d is not fix else marked(reference)
+            with self.subTest(case=d.name):
+                self.assertIsNotNone(rx.search(text))
+                for cut in (("separately and isn't included in", "included in"), ("without your approval", "as I go"),
+                            ("If you cancel", "Once you cancel")):
+                    self.assertIsNone(rx.search(text.replace(*cut)), cut)
 
     def test_graders_read_ascii_classes_only(self):
         """Every class a grader uses means the same in JavaScript and Python: compiled with re.ASCII (JavaScript's
@@ -427,6 +444,35 @@ class EvalCases(unittest.TestCase):
                     self.assertEqual("<<'DRAFT'" in script, tag == "fix")
                     kept = compiled(next(g for n, g, _ in graders if n == "kept-the-facts.md"))
                     self.assertTrue(kept.search(marked(facts_source(d, prompt))))
+
+    def test_longform_lint_never_sent_to_devnull(self):  # #162: `check … >/dev/null; judge-input --keep r7d`
+        """Each longform case fails a run whose trace sends a `check` call's output to /dev/null. Other redirects
+        (a claims call's stderr, a check without one) don't count."""
+        hits = [r'"command":"R=\"python3 /x/lib/run.py\"; $R check \"$f\" --plugin-profile \x27default\x27 '
+                r'>/dev/null; $R judge-input"',
+                r'"command":"R=\"python3 /x/lib/run.py\"; $R check \"$f\" --plugin-profile \x27default\x27 '
+                r'> /dev/null; $R judge-input"',
+                r'"command":"R=\"python3 /x/lib/run.py\"; $R check \"$f\" --plugin-profile \x27default\x27 '
+                r'&>/dev/null; $R judge-input"',
+                "python3 /x/lib/run.py check a.md >/dev/null"]
+        misses = [r'"command":"R=\"python3 /x/lib/run.py\"; $R check \"$f\" --plugin-profile \x27default\x27; '
+                  r'$R judge-input"',
+                  r'"command":"python3 /x/lib/run.py claims record a.md --from r.json 2>/dev/null"',
+                  "python3 /x/lib/run.py check a.md 2>/dev/null"]
+        hits = [h.replace(r"\x27", "'") for h in hits]
+        misses = [m.replace(r"\x27", "'") for m in misses]
+        for d in sorted(p for p in EXTRA[0].iterdir() if p.is_dir()):
+            with self.subTest(case=d.name):
+                g = next((g for n, g, _ in _case(d)[3] if n == "no-lint-to-devnull.md"), None)
+                self.assertIsNotNone(g, "no graders/no-lint-to-devnull.md")
+                self.assertEqual((g.get("type"), g.get("target"), g.get("match")), ("regex", "trace", "not_contains"))
+                for token in NOT_PORTABLE:
+                    self.assertNotIn(token, g["pattern"], f"{token} isn't portable JS/Python regex")
+                rx = compiled(g)
+                for h in hits:
+                    self.assertIsNotNone(rx.search(h), h)
+                for m in misses:
+                    self.assertIsNone(rx.search(m), m)
 
     def test_marker_graders_read_the_piece_only(self):
         """Every case that asks for the piece between markers grades only that piece: a report around it that

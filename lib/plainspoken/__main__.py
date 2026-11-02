@@ -38,6 +38,7 @@ from pathlib import Path
 from plainspoken import (_util, adapters, calibrate, capture, checker, claims, claims_tools, config, doctor, evalcli,
                          extraction, hosts, judges, justify, kaizen, ledger, mining, modules, overrides, pinning, proposals,
                          reader_value, register, reply, report, setup, toolcall, voice)
+from plainspoken import meaning
 from plainspoken.doc import CONTENT_TYPES
 from plainspoken.profile import CONTENT_KINDS, Profile, ProfileError, locales
 from plainspoken.registry import load_config
@@ -81,6 +82,24 @@ def _same_file(a: Path, b: Path) -> bool:
         return config.resolve_path(Path(a)) == config.resolve_path(Path(b))
     except (OSError, RuntimeError, ValueError):
         return False
+
+
+def _save_lint(lint: dict, path: Path, prof: Profile, cfg, root: Path, paths: dict[str, Path]) -> None:
+    """Save `lint` as the article's keyed <key>.lint.json (atomically: the gate and merge read it, never half a file),
+    then capture it, which rotates the snapshot. `check`'s keyed path, and `judge-input`'s when the saved lint isn't
+    current (#162). Raises OSError when the report can't be written."""
+    previous = report.read_json(paths["lint"])  # before it's overwritten
+    paths["lint"].parent.mkdir(parents=True, exist_ok=True)
+    report.write_atomic(paths["lint"], json.dumps(lint, indent=2, ensure_ascii=False) + "\n")
+    capture.for_check(lint, path, prof, cfg, root, previous=previous, snapshot=paths["checked"],
+                      reports=paths["checked"].parent)
+
+
+def _lint_current(lint: dict | None, path: Path, prof: Profile, cfg, content_type: str) -> bool:
+    """A saved lint `judge-input` can reuse: made of this text, with this profile, ruleset and content type."""
+    return (lint is not None and lint.get("article_sha256") == report.sha256(path)
+            and lint.get("profile_sha256") == prof.sha256 and lint.get("ruleset_version") == cfg.version
+            and lint.get("content_type") == content_type)
 
 
 def _profile_ex(args: argparse.Namespace, root: Path) -> tuple[Profile, bool]:
@@ -262,6 +281,17 @@ def _main(argv: list[str] | None) -> int:
     pa = sub.add_parser("paths", help="print every report-file path for an article")
     pa.add_argument("path", type=Path)
     pa.add_argument("--reports", type=Path)
+    md = sub.add_parser("meaning-diff", help="list the numbers, limits and promises an edit changed, for the owner "
+                                             "(word-level, free; never a verdict)")
+    md.add_argument("path", type=Path)
+    md_base = md.add_mutually_exclusive_group()
+    md_base.add_argument("--start", action="store_true", help="save the file as the baseline, before the first edit")
+    md_base.add_argument("--first-draft", action="store_true",
+                         help="save a write run's whole first draft, before any edit: later compares list what "
+                              "was added since it")
+    md.add_argument("--before", type=Path, help="compare this file with FILE instead (saves nothing)")
+    md.add_argument("--json", action="store_true")
+    md.add_argument("--reports", type=Path)
     m = sub.add_parser("merge", help="combine lint + judge verdicts; prove coverage")
     m.add_argument("path", type=Path)
     m.add_argument("--reports", type=Path)
@@ -287,8 +317,12 @@ def _main(argv: list[str] | None) -> int:
                       help="validate <stem>.justify.json and print the JR judge's input")
     j.add_argument("--profile", help="with --review-input: the voice profile whose calibration notes the JR judge gets")
     j.add_argument("--plugin-profile")
-    ji = sub.add_parser("judge-input", help="print one JSON judge-input object per group, J1 to J4")
+    ji = sub.add_parser("judge-input", help="print one JSON judge-input object per group, J1 to J4; judge-input "
+                                            "lints FILE itself when its saved lint isn't current, and prints the lint "
+                                            "on stderr; stdout is only the four JSON lines")
     ji.add_argument("path", type=Path)
+    ji.add_argument("--content-type", choices=CONTENT_TYPES,
+                    help="when it lints: the content type (default: the saved lint's, else article)")
     ji.add_argument("--reports", type=Path)
     ji.add_argument("--profile")
     ji.add_argument("--plugin-profile")
@@ -373,19 +407,16 @@ def _main(argv: list[str] | None) -> int:
             print(f"plainspoken: --no-record saves no report: --out {target} is this article's lint report; drop "
                   f"--out or name another file", file=sys.stderr)
             return 2
-        previous = report.read_json(paths["lint"]) if keyed else None  # before it's overwritten
-        if target:
-            try:
+        try:
+            if keyed:
+                _save_lint(lint, args.path, prof, cfg, root, paths)
+            elif target:  # --out elsewhere may be a pipe or device
                 target.parent.mkdir(parents=True, exist_ok=True)
-                if keyed:  # the gate and merge read it: never half a file. --out elsewhere may be a pipe or device.
-                    report.write_atomic(target, payload + "\n")
-                else:
-                    target.write_text(payload + "\n", encoding="utf-8")
-            except OSError as e:
-                return _input_error(target, e, "write")
-        if not args.no_record:
-            capture.for_check(lint, args.path, prof, cfg, root, previous=previous,
-                              snapshot=paths["checked"] if keyed else None, reports=paths["checked"].parent)
+                target.write_text(payload + "\n", encoding="utf-8")
+        except OSError as e:
+            return _input_error(target, e, "write")
+        if not keyed and not args.no_record:
+            capture.for_check(lint, args.path, prof, cfg, root, reports=paths["checked"].parent)
         print(payload if args.json else report.summarise(lint))
         return 1 if report.lint_status(lint) == "BLOCK" else 0
     if args.cmd == "profile":
@@ -473,17 +504,28 @@ def _main(argv: list[str] | None) -> int:
         return 0 if merged["status"] == "PASS" else 1
     if args.cmd == "status":
         return _draft_status(args, root)
+    if args.cmd == "meaning-diff":
+        return _meaning_diff(args, root)
     if args.cmd == "judge-input":
         reports_dir = args.reports or report.reports_dir_default(root)
-        try:
-            items = judges.judge_input(args.path, _profile(args, root), reports_dir, root)
+        try:  # #162: the lint arrives with the judge input, so there's no separate lint call to throw away
+            prof, cfg = _profile(args, root), load_config()
+            paths = report.report_paths(args.path, reports_dir, root)
+            lint = report.read_json(paths["lint"])
+            saved = (lint or {}).get("content_type")
+            ctype = args.content_type or (saved if saved in CONTENT_TYPES else "article")
+            if not _lint_current(lint, args.path, prof, cfg, ctype):
+                lint = report.run_lint(args.path, prof, ctype, cfg)
+                _save_lint(lint, args.path, prof, cfg, root, paths)
+            items = judges.judge_input(args.path, prof, reports_dir, root)
         except _INPUT_ERRORS as e:
             return _input_error(args.path, e, "prepare judge input for")
+        print(report.summarise(lint), file=sys.stderr)  # stdout stays the four lines: hosts save it as the JSONL
         keep = {k.strip() for arg in args.keep for k in arg.split(",") if k.strip()}
         stray = judges.stray_keeps(args.path, reports_dir, root, keep)
         if stray:  # #162: a keep names a line this pass's lint printed, never one typed before it was read
             print(f"plainspoken: --keep {', '.join(stray)}: the current lint has no open BLOCK or lint-owned WARN for "
-                  "that rule. Read the lint (`check`) and keep only the rules it prints.", file=sys.stderr)
+                  "that rule. Read the lint above and keep only the rules it prints.", file=sys.stderr)
             return 2
         held = judges.open_lint(args.path, reports_dir, root, keep)
         if held:
@@ -491,8 +533,9 @@ def _main(argv: list[str] | None) -> int:
                   "judges say):", file=sys.stderr)
             for f in held:
                 print(f"  {f['severity']:5} r{f['rule']:<4} L{f.get('line', '?')}", file=sys.stderr)
-            print("Fix them and run `check` again, or rerun with --keep <rule> for each one you leave (a WARN you'll "
-                  "justify after merge).", file=sys.stderr)
+            print("Fix them and run judge-input again (at most two lint-only passes before the first judges, "
+                  "counting write step 6's), or rerun with --keep <rule> for each one you leave (a WARN you'll justify "
+                  "after merge).", file=sys.stderr)
             return 1
         hold = [] if args.ignore_claims else claims_tools.judge_hold(
             args.path, root, report.report_paths(args.path, reports_dir, root)["claims-check"],
@@ -959,13 +1002,22 @@ def _draft_status(args: argparse.Namespace, root: Path) -> int:
                                          extraction.platform_names(root))
     except _INPUT_ERRORS as e:
         rep = {"status": "INCOMPLETE", "reasons": [f"can't report: {type(e).__name__}: {_first_line(e)}"]}
+    try:  # what an edit changed in the meaning (#147): listed for the owner, never a verdict
+        meaning_state, changes = meaning.saved(args.path, root, reports_dir)
+        moved = meaning.owner_items(changes, path=claims_tools.display_path(
+            report.report_paths(args.path, reports_dir, root)["meaning"], root))
+    except _INPUT_ERRORS:
+        meaning_state, changes, moved = "stale", [], []
     try:  # read from the ledger, so a report can't say "none" while a claim waits on the owner (#45)
         if ledger is None:
             raise FileNotFoundError("no ledger")
         owner = claims.needs_owner(claims.load_ledger(ledger))
-        owner_lines = [f"{reply.OWNER_MARKER} {len(owner) or 'none'}", *(f"  {o}" for o in owner)]
+        owner_lines = [f"{reply.OWNER_MARKER} {len(owner) + len(changes) or 'none'}", *(f"  {o}" for o in owner)]
     except _INPUT_ERRORS:
         owner_lines = [f"{reply.OWNER_MARKER} unknown (no readable ledger)"]
+    owner_lines += [f"  {m}" for m in moved]
+    if meaning_state == "stale":
+        owner_lines.append("meaning: stale (rerun meaning-diff)")
     contract = reader_value.default_contract(args.path, root)
     shown = claims_tools.display_path(contract, root)
     counted = f"words: {words} (body text; headings, tables, code and numbers not counted)"  # #63: say what it counts
@@ -973,6 +1025,42 @@ def _draft_status(args: argparse.Namespace, root: Path) -> int:
                      *(f"  {r}" for r in rep["reasons"]), *owner_lines, counted,
                      f"reader-value contract: {shown}" + ("" if contract.is_file() else " (missing)")]))
     return 0 if check_status == rep["status"] == "PASS" else 1
+
+
+def _meaning_diff(args: argparse.Namespace, root: Path) -> int:
+    """`meaning-diff`: `--start` or `--first-draft` saves a baseline; then FILE against it (or `--before OLD`), listed
+    for the owner.
+    Exit 0 when it ran, whatever it lists; 2 on bad input."""
+    reports_dir = args.reports or report.reports_dir_default(root)
+    try:
+        if not args.path.is_file():
+            raise FileNotFoundError(f"no such file: {args.path}")
+        if args.first_draft:
+            meaning.first_draft(args.path, root, reports_dir)
+            print(f"meaning-diff: first draft saved for {args.path}")
+            return 0
+        if args.start:
+            age = meaning.start(args.path, root, reports_dir)
+            print(f"meaning-diff: baseline saved for {args.path}" + (
+                "" if age is None else f"; also listing what was added since the first draft saved {age} min ago"))
+            return 0
+        if args.before is not None:
+            changes = meaning.diff(args.before.read_text(encoding="utf-8"), args.path.read_text(encoding="utf-8"))
+            print(json.dumps({"changes": changes}, indent=2, ensure_ascii=False) if args.json
+                  else meaning.summarise(changes))
+            return 0
+        before = meaning.baseline(args.path, root, reports_dir)
+        if before is None:
+            print(f"plainspoken: no baseline for {args.path}: run meaning-diff {args.path} --start before the first "
+                  "edit", file=sys.stderr)
+            return 2
+        rec = meaning.record(args.path, root, reports_dir, before)
+    except _INPUT_ERRORS as e:
+        return _input_error(args.path, e, "compare")
+    shown = claims_tools.display_path(report.report_paths(args.path, reports_dir, root)["meaning"], root)
+    print(json.dumps(rec, indent=2, ensure_ascii=False) if args.json
+          else meaning.summarise(rec["changes"], path=shown))
+    return 0
 
 
 def _record(args: argparse.Namespace, root: Path) -> int:

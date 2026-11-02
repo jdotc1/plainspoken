@@ -19,7 +19,9 @@ writing. It explains the check step by step, what each result means, and what th
 
 1. **Lint.** The lint is a fixed set of pattern rules that code runs on the text, so it gives the same result every
    time: banned words, em dashes over the limit, transitions, sentence rhythm and the like. Each finding is a BLOCK
-   (must go), a WARN (fix it or give a reason) or a CANDIDATE, which a judge decides. Before the judges start, the check fixes lint findings in at most
+   (must go), a WARN (fix it or give a reason) or a CANDIDATE, which a judge decides. `judge-input`, the call that
+   gives the judges their input, runs the lint itself whenever the saved one doesn't match the text, and prints it
+   first, so there's no separate lint call to skip. Before the judges start, the check fixes lint findings in at most
    two lint-only passes, so the judges read a lint-clean draft. A line it keeps is passed on with `--keep`, and only
    for a rule that lint run printed. If the file has a claim ledger that isn't current, `judge-input` waits for it;
    a check run on its own carries on with `--ignore-claims` and says so in its report.
@@ -41,9 +43,17 @@ writing. It explains the check step by step, what each result means, and what th
 5. **Up to two fix passes.** A fix pass cuts, joins or splits sentences, or restates plainly what's already there. A
    join uses "and" or "but", or merges two sentences; it never adds a clause, detail or reason. Rhythm fixes (rules
    7 and 7d) join two neighbouring sentences in their own words or split one, and never pad a sentence to reach a
-   length; when that can't clear the warning, the warning is kept and justified. A fix never adds a fact, number,
-   name, quote, example or opinion. After each pass the lint and all four judges run again, because the text
-   changed.
+   length; when that can't clear the warning, the warning is kept and justified. In a piece under 150 words, rule 7d
+   flags only a run of short sentences, never a section that lacks a long one. A greeting or sign-off line, and a
+   line that's only a link or button label, don't count as sentences for rule 7d. A fix never adds a fact, number, name, quote, example or opinion. After each pass
+   the lint and all four judges run again, because the text changed.
+6. **What the fixes changed.** Before its first lint the check saves the draft as it was (`meaning-diff --start`),
+   and when it has edited the draft it compares the two (`meaning-diff`). Any number, price, qualifier ("over 22
+   years"), negation, condition, exclusion, promise or added "because" that a fix dropped or added is listed under
+   `needs the owner` as an `M` line, for you to check. These lines never change the result. The comparison is
+   word-level and free: a change made without one of those words isn't seen. When `write` drafted the piece, it also
+   saves the first draft, so a reason or promise added by any edit since is listed. Limits it cut from its own first
+   draft aren't; only what the check's own fixes dropped is.
 
 The check writes its files to `.plainspoken/reports/` in the project you run it from. Every report file is listed in
 [docs/report-contract.md](../docs/report-contract.md).
@@ -70,7 +80,9 @@ check it again.
   humanize, and the file stays exactly as it is. You get the BLOCK and WARN lines and the result, and it says plainly
   that nothing was fixed.
 - **A quick lint from stdin.** `python3 <plugin>/lib/run.py check -` lints a draft piped in on stdin and saves
-  nothing. A draft under 300 words is checked as social, a longer one as an article.
+  nothing. A draft under 300 words is checked as social, a longer one as an article. Rule 7d already checked those
+  social drafts for a run of short sentences only, and since ruleset 4.4.0 it checks any piece under 150 words that
+  way, whatever its type.
 - **A lint that leaves no trace.** `check --no-record` prints the lint and saves no report (unless `--out` names
   another file), no kaizen event and no snapshot. Use it for a quick look that shouldn't count as kaizen evidence.
 
@@ -94,8 +106,9 @@ the text it's given, never a platform's rendered version.
 Humanize rewrites a draft to remove AI writing patterns, without a full check. It works from 26 patterns, strongest
 first, and keeps the writer's voice from the profile or a sample you give it. Its first rule is the same as the
 check's: remove, never add. When a sentence needs a detail it doesn't have, it flags that for you instead of
-inventing one. Used on its own, it may lint the result once and fix again once if a BLOCK remains. The check calls it
-for its fix passes.
+inventing one. Used on its own, it may lint the result once and fix again once if a BLOCK remains. On a file, it
+saves the text before rewriting and lists in its summary any number, limit or promise the rewrite changed
+(`meaning-diff`), so you can check them; it doesn't for pasted text. The check calls it for its fix passes.
 
 ## Write
 
@@ -114,8 +127,8 @@ this order:
    checker runs in the foreground, and the claims step has to be finished before the judges start: a claims fix
    after the judges would mean all four again.
 5. **Check.** It runs the full check, and reruns the claims steps if a fix changed the draft, before any more judges.
-   `judge-input` holds the judges (exit 3) while the draft's claim ledger isn't current, unless the only open lines
-   are ones held for you.
+   `judge-input` lints the draft again if a fix changed it, and holds the judges (exit 3) while the draft's claim
+   ledger isn't current, unless the only open lines are ones held for you.
 
 Its report starts with the lines `python3 <plugin>/lib/run.py status <draft>` prints, copied exactly: the check and
 claims results, the claims that need you, the word count and the reader-value contract path. Those come from the

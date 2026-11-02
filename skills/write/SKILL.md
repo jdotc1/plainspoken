@@ -100,9 +100,12 @@ Rewrite the lines that drift before you start the next section. Every fact comes
 When the piece recommends or reports findings, say how strong each one's evidence is:
 `references/confidence-labels.md`.
 
+Once the whole first draft is saved, before you change a word of it (a lint nudge can arrive with the save), run
+`RUN meaning-diff '<draft>' --first-draft`, so step 8 can list a reason or promise an edit added.
+
 ### 6. Claims
 
-First make the check's lint-only passes here, so a lint fix lands before the ledger is built: its step 1 on the
+First make the check's lint-only passes here, so a lint fix lands before the ledger is built: the lint on the
 saved draft (`RUN check '<draft>' --plugin-profile '${user_config.profile}'`), read in full (never sent to
 `/dev/null`), fixing BLOCK and WARN lines by cutting, joining, splitting or restating, at most twice (a join adds no
 clause, detail or reason). Those two are the run's whole lint-only allowance: once they're spent, check step 1
@@ -134,13 +137,14 @@ justification leaves the check UNRESOLVED.
 
 If the check changed the draft, the ledger no longer matches it, and the check's `judge-input` holds the judges
 back (exit 3) until it does: rerun the claims skill's steps 4 to 6 once (back to step 2 for any claim a fix
-touched), checker in the foreground, then `RUN claims status '<draft>'` and the check's step 1 again. That's one
-claims checker, not four judges. Pass `--ignore-claims` only once the claims skill has stopped (its two fix rounds
+touched), checker in the foreground, then `RUN claims status '<draft>'` and the check's step 1 (judge-input)
+again. That's one claims checker, not four judges. Pass `--ignore-claims` only once the claims skill has stopped (its two fix rounds
 spent, or it can't run). If a status still isn't current, say so in the report and tell the user to run
 `/plainspoken:claims <draft>` again. Report the status lines from those last runs, whatever they say.
 
 ### 8. Report
 
+First run `RUN meaning-diff '<draft>'` (exit 2: go on).
 Run `RUN status '<draft>' --plugin-profile '${user_config.profile}'` (plus step 2's `--profile`, if any). It reads
 the last saved check and claims results back; it runs and writes nothing. Start the report with this block, with
 no words before it; a report without it is incomplete. Fill it in, with the `status` lines copied exactly as

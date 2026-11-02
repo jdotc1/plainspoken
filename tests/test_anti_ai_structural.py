@@ -2,9 +2,11 @@
 import dataclasses
 import unittest
 
+from plainspoken import metrics, report
 from plainspoken.checks_lexical import CHECKS as LEXICAL
 from plainspoken.checks_structural import CHECKS
 from plainspoken.doc import parse
+from plainspoken.profile import load as load_profile
 from plainspoken.registry import load_config
 from tests._profiles import PRODUCT, NARRATIVE, CONSULTING
 
@@ -31,10 +33,29 @@ def with_thresholds(**over):
 
 LONG = "This sentence goes on for quite a while because it needs more than twenty five words to count as a long flowing sentence in the section."
 
+# #148: rule 7d's no-long-sentence test skips pieces under 150 words. A fixture that needs that test appends this
+# section, which takes the piece past the gate and adds no finding of its own (long sentences, uneven lengths, no
+# listed word). It holds no human marker either, so it never clears a fixture's HM WARN.
+ABOVE_GATE = (
+    "\n\n## Background\n\n"
+    "The club began running its own training nights in the old hall behind the railway station. "
+    "Most of the members lived within walking distance of the hall and the committee kept the doors open late on "
+    "Tuesday and Thursday evenings for anyone who wanted to come. "
+    "A local builder fixed the roof in the first winter at no charge. "
+    "The hall still has the original timber floor, which the members sand back by hand every second summer when "
+    "the weather is dry enough to leave the windows open. "
+    "Nobody remembers who painted the scoreboard, but it has hung above the stage for forty years. "
+    "When the council offered to replace the hall with a modern centre on the edge of town, the members voted to "
+    "stay where they were and to keep paying the small rent themselves. "
+    "The rent has gone up twice since then, and the members paid it both times. "
+    "The oldest member still turns up on Tuesday nights to open the doors and make the tea before the first "
+    "training group arrives at the hall."
+)
+
 
 class Structural(unittest.TestCase):
     def test_staccato_no_long_sentence_warns(self):
-        body = "## A\n\nShort one here. Another short one. And a third."
+        body = "## A\n\nShort one here. Another short one. And a third." + ABOVE_GATE  # #148: past the 150-word gate
         self.assertEqual([f.severity for f in run("7d", body)], ["WARN"])
         # Preflight C5: three sentences, so the section is actually assessed (two would be skipped).
         self.assertEqual(run("7d", f"## A\n\nShort one here. Another short one. {LONG}"), [])
@@ -74,7 +95,7 @@ class Structural(unittest.TestCase):
         self.assertEqual(run("HM", "I think it's fine. But not always."), [])
 
     def test_rhythm_remedies_fit_the_fix_rule(self):  # #30: a fix cuts, joins, splits or restates; it never adds
-        staccato = run("7d", "## A\n\nShort one here. Another short one. And a third.")
+        staccato = run("7d", "## A\n\nShort one here. Another short one. And a third." + ABOVE_GATE)
         uniform = run("7", "One two three four five. " * 5)
         bursty = [f for f in run("12f", " ".join(["The cat sat on the mat."] * 60)) if f.excerpt.startswith("burstiness")]
         markers = run("HM", "The system processes requests. The system returns responses. Latency remains consistently low.")
@@ -93,8 +114,8 @@ class Structural(unittest.TestCase):
         run5 = "## A\n\n" + " ".join(["Tiny one."] * 5) + " " + LONG
         faq7 = "## FAQ\n\n" + " ".join(["It is short."] * 7) + " " + LONG
         nar7 = "## Match\n\n" + " ".join(["Goal kicked here."] * 7)
-        venue = "## Venue profile: Harbour Oval\n\n" + " ".join(["The stand faces west."] * 4)
-        found = (run("7d", "## A\n\nShort one here. Another short one. And a third.") + run("7d", run5)
+        venue = "## Venue profile: Harbour Oval\n\n" + " ".join(["The stand faces west."] * 4) + ABOVE_GATE
+        found = (run("7d", "## A\n\nShort one here. Another short one. And a third." + ABOVE_GATE) + run("7d", run5)
                  + run("7d", faq7) + run("7d", nar7, profile=NARRATIVE) + run("7d", venue, profile=NARRATIVE))
         self.assertEqual(len(found), 5)
         for f in found:
@@ -136,7 +157,7 @@ class StaccatoFaq(unittest.TestCase):
     def test_faq_section_skips_the_no_long_sentence_half(self):
         body = "## FAQ\n\nIs it free? Yes, for now. Does it work offline? It does not."
         self.assertEqual(run("7d", body), [])
-        self.assertEqual([f.severity for f in run("7d", body.replace("## FAQ", "## Notes"))], ["WARN"])
+        self.assertEqual([f.severity for f in run("7d", body.replace("## FAQ", "## Notes") + ABOVE_GATE)], ["WARN"])
 
     def test_faq_heading_variants(self):
         for h in ("## FAQs", "## Frequently asked questions", "## FAQ: Google Ads"):
@@ -156,6 +177,174 @@ class StaccatoFaq(unittest.TestCase):
         fewer = "".join(f"  - question: Question {i}?\n    answer: It is short. {LONG}\n" for i in range(4))
         doc = parse(f"---\nfaqs:\n{fewer}---\n\n{LONG}\n", profile=CONSULTING)
         self.assertEqual(CHECKS["7d"](doc, CFG), [])
+
+
+class StaccatoLetterFrame(unittest.TestCase):
+    """#148: a greeting that opens the piece and a sign-off that closes it aren't sentences for rule 7d."""
+
+    def test_greeting_is_not_a_short_sentence(self):
+        self.assertEqual(run("7d", "Hi Sam,\n\nThanks. Here it is. Short one. Another one.\n\n" + LONG), [])
+
+    def test_signoff_is_not_a_short_sentence(self):
+        self.assertEqual(run("7d", LONG + "\n\nThanks. Here it is. Short one. Another one.\n\nCheers,\nAlex"), [])
+
+    def test_short_answer_with_comma_still_counts(self):  # golden JR-7d-001 lost its 7d to a looser pattern
+        f = run("7d", "Yes, on a lead. Two more. Three here. Four now. Five, done.\n\n" + LONG)
+        self.assertEqual([x.severity for x in f], ["WARN"])
+        self.assertIn("5 consecutive", f[0].message)
+
+    def test_greeting_mid_piece_still_counts(self):
+        f = run("7d", LONG + "\n\nHi Sam,\n\nThanks. Here it is. Short one. Another one.\n\n" + LONG)
+        self.assertEqual([x.severity for x in f], ["WARN"])
+        self.assertIn("5 consecutive", f[0].message)
+
+    def test_frontmatter_faq_answer_never_trimmed(self):
+        answers = "".join(f"  - question: Question {i}?\n    answer: It is short.\n" for i in range(6))
+        answers += "  - question: Who wrote this?\n    answer: Thanks, Alex\n"
+        doc = parse(f"---\nfaqs:\n{answers}---\n\n{LONG}\n", profile=CONSULTING)
+        f = CHECKS["7d"](doc, CFG)
+        self.assertEqual([x.severity for x in f], ["WARN"])
+        self.assertIn("in the FAQ", f[0].message)
+
+
+CTA = "The first step is a free call. If it's a clean-up, I'll quote it afterwards."
+BUTTONS = (
+    "[Book your free 30-minute call]",
+    "**[Book your free call]**",
+    "[Book your free call](https://example.com/book)",
+    "**[Book your free call](https://example.com/book)**",
+    "__[Book your free call]__",
+    "*[Book your free call]*",
+    "[Book your free call][cta]",
+    '<a class="button" href="https://example.com/book">Book your free call</a>',
+)
+
+
+class StaccatoButtonLine(unittest.TestCase):
+    """#186: a line that's only a link or a button label isn't a sentence for rule 7d. The bookkeeping finals of round 9
+    got a no-long WARN on a two-sentence call to action because the button was the section's third sentence."""
+
+    def test_two_sentences_and_a_button_stay_quiet(self):
+        for button in BUTTONS:
+            self.assertEqual(run("7d", f"## Book a call\n\n{CTA}\n\n{button}" + ABOVE_GATE), [], button)
+
+    def test_button_on_the_next_line_of_the_paragraph(self):
+        self.assertEqual(run("7d", f"## Book a call\n\n{CTA}\n[Book your free call](https://example.com/book)"
+                                   + ABOVE_GATE), [])
+
+    def test_three_real_short_sentences_still_warn(self):
+        found = run("7d", f"## Book a call\n\n{CTA} It takes half an hour." + ABOVE_GATE)
+        self.assertEqual([(f.severity, f.excerpt) for f in found], [("WARN", "Book a call")])
+
+    def test_three_real_short_sentences_and_a_button_still_warn(self):
+        found = run("7d", f"## Book a call\n\n{CTA} It takes half an hour.\n\n[Book your free call]" + ABOVE_GATE)
+        self.assertEqual([(f.severity, f.excerpt) for f in found], [("WARN", "Book a call")])
+
+    def test_sentence_containing_a_link_still_counts(self):
+        for line in ("Read [the guide](https://example.com/guide) first.",
+                     "[The guide](https://example.com/guide) comes first.",
+                     "**Read [the guide](https://example.com/guide) first.**"):
+            found = run("7d", f"## Book a call\n\n{CTA}\n\n{line}" + ABOVE_GATE)
+            self.assertEqual([f.excerpt for f in found], ["Book a call"], line)
+
+    def test_link_closed_by_a_full_stop_still_counts(self):  # written as a sentence, so it's read as one
+        found = run("7d", f"## Book a call\n\n{CTA}\n\n[The guide](https://example.com/guide)." + ABOVE_GATE)
+        self.assertEqual([f.excerpt for f in found], ["Book a call"])
+
+    def test_long_sentence_written_as_one_link_still_counts(self):
+        self.assertEqual(run("7d", f"## Book a call\n\n{CTA}\n\n[{LONG}](https://example.com/book)" + ABOVE_GATE), [])
+
+    def test_two_sentences_inside_one_label_still_count(self):
+        found = run("7d", f"## Book a call\n\n{CTA}\n\n[Book now. It's free.](https://example.com/book)" + ABOVE_GATE)
+        self.assertEqual([f.excerpt for f in found], ["Book a call"])
+
+    def test_buttons_alone_stay_quiet(self):
+        self.assertEqual(run("7d", "## Next\n\n[Book a call]\n\n[Send an email]\n\n[Read the guide](https://example.com)"
+                                   + ABOVE_GATE), [])
+
+    def test_button_does_not_reach_a_short_run(self):
+        self.assertEqual(run("7d", f"{LONG} Short one here. Two more here. Three more here. Four more here.\n\n"
+                                   "[Book your free call]"), [])
+        found = run("7d", f"{LONG} Short one here. Two more here. Three more here. Four more here. Five more here.\n\n"
+                          "[Book your free call]")
+        self.assertIn("5 consecutive", found[0].message)
+
+    def test_signoff_before_a_closing_button_still_goes(self):
+        self.assertEqual(run("7d", LONG + "\n\nThanks. Here it is. Short one. Another one.\n\nCheers,\nAlex\n\n"
+                                          "[Book your free call]"), [])
+
+    def test_narrative_profile_gets_the_same_reading(self):
+        real = "One here. Two here. Three here. Four here. Five here. Six here."
+        self.assertEqual(run("NR-2", f"## Book a call\n\n{real}\n\n[Book your free call]", NARRATIVE), [])
+        self.assertEqual(len(run("NR-2", f"## Book a call\n\n{real} Seven here.\n\n[Book your free call]", NARRATIVE)), 1)
+
+    def test_other_rules_and_word_counts_still_see_the_button(self):
+        body = "## Book a call\n\nOne more short thing. Two more short things. [Book your free call]"
+        doc = parse(f"---\n---\n\n{body}\n", profile=PRODUCT)
+        self.assertIn("[Book your free call]", [s.text for s in doc.all_sentences()])
+        self.assertEqual(metrics.compute(doc, CFG)["words"], 12)
+        self.assertEqual([f.rule for f in run("7", "One more short thing. Two more short things. Three more short things. "
+                                                   "Four more short things.\n\n[Book your free call]")], ["7"])
+
+
+ISSUE_EMAIL_BODY = """Thanks for asking about cost. Here's how I'd set it up.
+
+I'd start with a free look at your Google Ads account. I'll check the search terms, the bidding and the conversion tracking. That takes me about a week, and you don't pay anything for it.
+
+After that, you can decide whether you want me to manage the account. If you do, I charge a flat monthly fee for management. Your ad spend is separate and goes straight to Google.
+
+To get started, I just need read access to the account. You can add me from the Access and security page in Google Ads. If you'd rather not, that's fine too.
+
+Let me know what suits you."""
+ISSUE_EMAIL = f"Hi Sam,\n\n{ISSUE_EMAIL_BODY}\n\nCheers,\nAlex\n"  # the 121-word email in #148
+CHOPPY_EMAIL = """Hi team,
+
+Big news. We are moving offices. The move happens next week. Please pack your desks. Boxes are in the kitchen. Label every box clearly. IT will move the screens. Do not unplug anything yourself. The new office is great. You will love it.
+
+Thanks,
+Dana
+"""
+
+
+def lint_rules(text, content_type="article"):
+    rep = report.lint_text(text, load_profile("default"), content_type, CFG)
+    return [(f["rule"], f["message"]) for f in rep["findings"] if f["rule"] in ("7", "7d") and f["severity"] == "WARN"]
+
+
+class StaccatoShortPiece(unittest.TestCase):
+    """#148 (ruleset 4.4.0): under `staccato_long_min_words` (150) words, 7d runs only its short-run test, as social
+    already did. A short email whose fix would be a padded sentence no longer gets the no-long WARN."""
+
+    def test_issue_email_gets_no_7d(self):
+        found = lint_rules(ISSUE_EMAIL)
+        self.assertEqual([r for r, _ in found], ["7"])  # rule 7 stays, as the issue asks
+
+    def test_same_section_in_a_long_article_still_warns(self):
+        found = run("7d", "## Cost\n\n" + ISSUE_EMAIL_BODY + ABOVE_GATE)
+        self.assertEqual([(f.excerpt, f.message[:24]) for f in found], [("Cost", "No sentence over 25 word")])
+
+    def test_short_choppy_email_keeps_its_findings(self):
+        found = lint_rules(CHOPPY_EMAIL)
+        self.assertEqual(sorted(r for r, _ in found), ["7", "7d"])
+        self.assertTrue(dict(found)["7d"].startswith("5 consecutive sentences under 12 words"), found)
+
+    def test_social_unchanged(self):
+        self.assertEqual([r for r, _ in lint_rules(ISSUE_EMAIL, "social")], ["7", "7"])
+
+    def test_gate_zero_restores_old_behaviour(self):
+        found = run_cfg("7d", "## A\n\nShort one here. Another short one. And a third.",
+                        with_thresholds(staccato_long_min_words=0))
+        self.assertEqual([f.message[:24] for f in found], ["No sentence over 25 word"])
+
+    def test_narrative_heading_gated(self):
+        venue = "## Venue profile: Harbour Oval\n\n" + " ".join(["The stand faces west."] * 3)
+        self.assertEqual(run("7d", venue, profile=NARRATIVE), [])
+        found = run("7d", venue + ABOVE_GATE, profile=NARRATIVE)
+        self.assertEqual([(f.severity, f.excerpt) for f in found], [("WARN", "Venue profile: Harbour Oval")])
+
+    def test_above_gate_adds_no_finding_of_its_own(self):
+        rep = report.lint_text(ABOVE_GATE.strip(), PRODUCT, "article", CFG)
+        self.assertEqual([f["rule"] for f in rep["findings"]], ["HM"])  # no marker on purpose: see ABOVE_GATE
 
 
 class BoldBullets(unittest.TestCase):
@@ -201,7 +390,7 @@ class Staccato(unittest.TestCase):
         self.assertEqual([x.severity for x in run("7d", seven, profile=NARRATIVE)], ["WARN"])
 
     def test_narrative_venue_profile_keeps_the_over_20_check(self):
-        body = "## Venue profile: Harbour Oval\n\n" + " ".join(["The stand faces west."] * 4)
+        body = "## Venue profile: Harbour Oval\n\n" + " ".join(["The stand faces west."] * 4) + ABOVE_GATE
         f = run("7d", body, profile=NARRATIVE)
         self.assertEqual([x.severity for x in f], ["WARN"])
         self.assertIn("20", f[0].message)

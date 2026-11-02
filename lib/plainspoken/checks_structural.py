@@ -78,6 +78,51 @@ def _short_run(sents: list[Sentence], short_len: int, run_len: int) -> Sentence 
     return None
 
 
+_SALUTATION = re.compile(r"(?:hi|hello|hey|dear|g'day|good (?:morning|afternoon|evening))\b[^.!?]{0,30},", re.I)
+_SIGNOFF = re.compile(r"(?i:cheers|thanks|thank you|many thanks|regards|kind regards|warm regards|best|best wishes"
+                      r"|all the best|sincerely|yours sincerely|yours|love|talk soon|see you),?(?:\s+[A-Z][\w.'-]*){0,3}")
+_FRAME_MAX_WORDS = 4
+
+
+def _frame_line(s: Sentence, pattern: re.Pattern[str]) -> bool:
+    return len(s.words) <= _FRAME_MAX_WORDS and bool(pattern.fullmatch(s.text.strip()))
+
+
+def _letter_frame(units: list[list[Sentence]]) -> list[list[Sentence]]:
+    """#148: a greeting ("Hi Sam,") that opens the piece and a sign-off ("Cheers, Alex") that closes it aren't
+    sentences for 7d. Only the first sentence of the first non-empty unit and the last of the last can go."""
+    filled = [i for i, ss in enumerate(units) if ss]
+    if not filled:
+        return units
+    out = [list(ss) for ss in units]
+    first, last = filled[0], filled[-1]
+    if _frame_line(out[first][0], _SALUTATION):
+        out[first] = out[first][1:]
+    if out[last] and _frame_line(out[last][-1], _SIGNOFF):
+        out[last] = out[last][:-1]
+    return out
+
+
+# A whole line that's one link or one button label: `[Book a call]`, `**[Book a call](url)**`, `<a href="url">Book</a>`.
+_BUTTON_LINE = re.compile(r"(\*\*|__|\*|_|)\[[^\[\]]+\](?:\([^)]*\)|\[[^\]]*\])?\1|<a\b[^>]*>(?:(?!</a>).)*</a>", re.I)
+
+
+def _not_buttons(doc: Doc, paragraphs, short_len: int) -> list[Sentence]:
+    """#186: the prose sentences of `paragraphs`, less any that's a source line holding only a link or a button label,
+    which isn't a sentence for 7d. A label of `short_len` words or more stays: that's a sentence written as a link, and
+    leaving only shorter ones out means 7d can lose a finding here but never gain one."""
+    out = []
+    for p in paragraphs:
+        labels = set()
+        for raw in doc.lines[p.line - 1:]:
+            if not raw.strip():
+                break
+            if _BUTTON_LINE.fullmatch(raw.strip()):
+                labels.add(_clean_inline(raw.strip()))
+        out += [s for s in _prose_sentences([p]) if not (s.text in labels and len(s.words) < short_len)]
+    return out
+
+
 def _faq_answer_sentences(doc: Doc) -> list[Sentence]:
     """The profile's FAQ frontmatter key renders as the page's FAQ; its answers are checked as one FAQ section."""
     key = doc.profile.faq_frontmatter_key
@@ -95,18 +140,28 @@ def staccato(doc: Doc, cfg: Config) -> list[Finding]:
 
     Narrative profiles (decision I5, whole article): WARN only when the run AND the no-long-sentence condition
     both hold, except a section whose heading matches the profile's `long_sentence_headings`, which fails on no
-    long sentence alone.
+    long sentence alone (in a piece of `staccato_long_min_words` or more).
+
+    A piece under `staccato_long_min_words` words (#148), like social, gets the short-run test only.
 
     FAQ sections, and frontmatter FAQ answers (every profile): short answers are the point, so only a run of
     `staccato_faq_short_run` short sentences WARNs.
+
+    A line that's only a link or a button label (#186), a greeting that opens the piece and a sign-off that closes it
+    (#148) aren't sentences here. Other rules and the word count still see them.
     """
     t = cfg.thresholds_for(doc)
     long_, short_len, run_len = t["staccato_long_sentence"], t["staccato_short_len"], t["staccato_short_run"]
     faq_run = t["staccato_faq_short_run"]
     narrative = "narrative" in doc.profile.flags
-    run_only = doc.content_type == "social"  # social: only a run of short sentences WARNs (severity table)
+    # Social, and any piece under staccato_long_min_words (#148): only a run of short sentences WARNs, because the
+    # fix the no-long test asks of a short email or text is a padded sentence.
+    short_piece = metrics.compute(doc, cfg)["words"] < t["staccato_long_min_words"]
+    run_only = doc.content_type == "social" or short_piece
     out = []
-    units = [(sec.heading, sec.level, sec.line, _prose_sentences(sec.paragraphs)) for sec in doc.sections]
+    units = [(sec.heading, sec.level, sec.line, _not_buttons(doc, sec.paragraphs, short_len)) for sec in doc.sections]
+    framed = _letter_frame([u[3] for u in units])  # body units only: frontmatter FAQ answers are never trimmed
+    units = [(heading, level, line, sents) for (heading, level, line, _), sents in zip(units, framed)]
     units.append(("FAQ (frontmatter faqs)", 2, 0, _faq_answer_sentences(doc)))
     for heading, level, line, sents in units:
         if len(sents) < 3:
@@ -120,7 +175,7 @@ def staccato(doc: Doc, cfg: Config) -> list[Finding]:
             continue
         no_long = max(len(s.words) for s in sents) <= long_
         run_end = _short_run(sents, short_len, run_len)
-        if narrative and any(p.search(heading) for p in doc.profile.long_sentence_headings) and no_long:
+        if narrative and any(p.search(heading) for p in doc.profile.long_sentence_headings) and no_long and not short_piece:
             out.append(Finding("7d", "WARN", at, where,
                                f"No sentence over {long_} words in this section — join two {_JOIN}"))
         elif narrative:
