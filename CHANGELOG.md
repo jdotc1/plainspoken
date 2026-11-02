@@ -5,6 +5,13 @@ new features and a patch release for fixes. release-please writes each entry fro
 "In short" lines were added by hand, and so were the corrections where a commit only referred to an issue
 but the entry said it closed it.
 
+## [0.13.1](https://github.com/littlebearapps/plainspoken/compare/v0.13.0...v0.13.1) (2026-11-02)
+
+
+### Documentation
+
+* **roadmap:** 0.14.0 picks up what 0.13.0 left open ([d3c9eee](https://github.com/littlebearapps/plainspoken/commit/d3c9eee4892d2e4ccaf9522ae8ae799f9fccb686))
+
 ## [0.13.0](https://github.com/littlebearapps/plainspoken/compare/v0.12.0...v0.13.0) (2026-11-01)
 
 In short: `meaning-diff` lists the numbers, limits and promises a fix dropped or changed, so the owner can check them.
