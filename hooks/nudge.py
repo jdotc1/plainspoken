@@ -85,9 +85,15 @@ _LONG = re.compile(
     r"|\b(?:[2-9]|two|three|four|five|multi)[- ]pages?\b|\blong-?form\b|\bin-depth\b"
     r"|\b(?:blog posts?|articles?|essays?|reports?|guides?|case stud(?:y|ies)|white ?papers?)\b"
     r"|\bfeatures? (?:on|about|stor(?:y|ies)|articles?)\b"
-    r"|\bfull check\b"
     r"|\bresearch(?:ing)?\b(?! (?:team|grants?|group|centre|center|projects?|papers?|lab|assistants?))"
     r"|\b(?:sources|cite|citations|references|fact-check)\b", re.I)
+# A mention of "full check" may be the subject of a short message, not a request to check the draft (#149).
+# Match an explicit instruction to run it, separate from the requested writing or as a coordinated action.
+_FULL_CHECK_REQUEST = re.compile(
+    r"(?:^|[.!?;:,\n]|\b(?:and|then)\b)\s*"
+    r"(?:(?:please|also|then)\s+|(?:can|could|would|will) you\s+)*"
+    r"(?:run|perform|do|carry out|give (?:it|this|the draft))\s+"
+    r"(?:an? |the )?full[ -]check\b", re.I)
 _URL = re.compile(r"https?://", re.I)
 _CODE = re.compile(r"\b(?:python|javascript|typescript|bash|shell|sql|regex|function|bug|unit tests?|"
                    r"code|commit message|docstring|json|yaml|stack ?trace)\b|\w\.(?:py|js|ts|sh|rb|go)\b", re.I)
@@ -127,6 +133,16 @@ def _asks_for_writing(rest: str) -> bool:
     return False
 
 
+def _full_check_requested(text: str) -> bool:
+    """A command to check this draft, not words quoted as part of the requested piece."""
+    quotes = list(_QUOTED.finditer(text))
+    for match in _FULL_CHECK_REQUEST.finditer(text):
+        if any(q.start() <= match.start() < q.end() and q.group() != text.strip() for q in quotes):
+            continue
+        return True
+    return False
+
+
 def intent(prompt: str) -> str | None:
     """'rewrite', 'draft-long', 'draft' or None for one user prompt."""
     if not isinstance(prompt, str):
@@ -144,7 +160,7 @@ def intent(prompt: str) -> str | None:
     if any(not _TECH_WORD.search(_PHRASE.match(rest).group(1)) for rest in _requests(_REWRITE_VERB, text)):
         return "rewrite"
     if any(_asks_for_writing(rest) for rest in _requests(_DRAFT_VERB, text)):
-        return "draft-long" if _LONG.search(text) or len(_URL.findall(text)) > 1 else "draft"
+        return "draft-long" if _LONG.search(text) or _full_check_requested(text) or len(_URL.findall(text)) > 1 else "draft"
     return None
 
 

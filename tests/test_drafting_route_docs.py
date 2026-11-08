@@ -9,8 +9,12 @@ ROOT = Path(__file__).resolve().parents[1]
 class DraftingRouteDocs(unittest.TestCase):
     def test_write_description_is_for_long_or_full_check_requests(self):
         skill = (ROOT / "skills/write/SKILL.md").read_text(encoding="utf-8")
-        description = next(line for line in skill.splitlines() if line.startswith("description:"))
-        self.assertIn("long piece (about 250+ words, or sources to research)", description)
+        description = next(line.removeprefix("description: ") for line in skill.splitlines()
+                           if line.startswith("description:"))
+        self.assertLessEqual(len(description), 240)
+        self.assertIn("writing people will read (an article, page, email, post, text message, caption or script)",
+                      description)
+        self.assertIn("250+ words or research", description)
         self.assertIn("full check on a short one", description)
         self.assertNotIn("short or long", description)
 
